@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_lsp::lsp_types::{Range, Url};
-use tree_sitter::{Parser, Query, Tree};
+use tree_sitter::{LanguageError, Parser, Query, Tree};
 
 use crate::model::{ElementKind, ModelElement, SpatialEntry, build_meta_model};
 pub struct ProtoParser {
@@ -34,9 +34,9 @@ impl ProtoDocument {
     ///
     /// # Returns
     ///
-    /// Returns `Some(ParsedTree)` housing the fully populated, search-ready
-    /// graph cache layer, or `None` if the Tree-sitter runtime engine fails to
-    /// initialize or parse the source.
+    /// Returns [`Some(ProtoDocument)`][ProtoDocument] housing the fully
+    /// populated, search-ready graph cache layer, or [`None`] if the
+    /// Tree-sitter runtime engine fails to initialize or parse the source.
     pub fn try_from_input(
         uri: Url,
         source: &[u8],
@@ -101,16 +101,17 @@ impl ProtoDocument {
 impl ProtoParser {
     pub fn new() -> Self {
         let mut parser = tree_sitter::Parser::new();
-
-        if let Err(e) = parser.set_language(&tree_sitter_proto::LANGUAGE.into()) {
+        let trace_error = |e: &LanguageError| {
             tracing::error!(
                 "Critical initialization failure: Failed to set Tree-sitter Protobuf language parser: {:?}",
                 e
             );
+        };
 
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            std::process::exit(1);
-        }
+        parser
+            .set_language(&tree_sitter_proto::LANGUAGE.into())
+            .inspect_err(trace_error)
+            .expect("Tree-sitter parser: setting language failed");
 
         Self { parser }
     }
