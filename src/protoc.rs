@@ -1,15 +1,27 @@
-use std::process::Command;
+use std::ffi::OsStr;
+use std::path::Path;
+use std::time::Duration;
 
 use async_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range};
+use tokio::process::Command;
 use tree_sitter::Point;
 
 use crate::utils::to_lsp_position;
 
-pub fn collect_diagnostics(
-    protoc_path: &str,
-    file_path: &str,
-    include_paths: &[String],
-) -> Vec<Diagnostic> {
+const PROTOC_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// # Cancellation safety
+///
+/// This method is cancel safe.
+pub async fn collect_diagnostics<I, P>(
+    protoc_path: &Path,
+    file_path: &Path,
+    include_paths: I,
+) -> Vec<Diagnostic>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<OsStr>,
+{
     let mut cmd = Command::new(protoc_path);
 
     // Add include paths
@@ -25,8 +37,8 @@ pub fn collect_diagnostics(
     cmd.arg(file_path);
 
     // Run protoc and capture output
-    match cmd.output() {
-        Ok(output) => {
+    match tokio::time::timeout(PROTOC_TIMEOUT, cmd.kill_on_drop(true).output()).await {
+        Ok(Ok(output)) => {
             if output.status.success() {
                 Vec::new()
             } else {
@@ -34,8 +46,15 @@ pub fn collect_diagnostics(
                 parse_protoc_output(&error)
             }
         }
-        Err(e) => {
-            tracing::error!(error=%e, "failed to run protoc");
+        Ok(Err(error)) => {
+            tracing::error!(%error, "failed to run protoc");
+            Vec::new()
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                timeout_ms = PROTOC_TIMEOUT.as_millis(),
+                "protoc execution timed out and was killed",
+            );
             Vec::new()
         }
     }

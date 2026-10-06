@@ -2,21 +2,20 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use async_lsp::lsp_types::{Url, WorkspaceFolder};
 use pkg_config::Config;
 
-use crate::formatter::ClangFormatter;
-
-use crate::config::ProtolsConfig;
+use crate::{config::ProtolsConfig, formatter::clang::ClangFormatter, utils::OutermostPaths};
 
 const CONFIG_FILE_NAMES: [&str; 2] = [".protols.toml", "protols.toml"];
 
 pub struct WorkspaceProtoConfigs {
     workspaces: HashSet<Url>,
     configs: HashMap<Url, ProtolsConfig>,
-    formatters: HashMap<Url, ClangFormatter>,
+    formatters: HashMap<Url, Arc<ClangFormatter>>,
     protoc_include_prefix: Vec<PathBuf>,
     cli_include_paths: Vec<PathBuf>,
     init_include_paths: Vec<PathBuf>,
@@ -47,34 +46,46 @@ impl WorkspaceProtoConfigs {
         }
     }
 
-    fn get_config_file_path(wpath: &PathBuf) -> Option<PathBuf> {
+    async fn get_config_file_path(wpath: &PathBuf) -> Option<PathBuf> {
         for file in CONFIG_FILE_NAMES {
             let p = Path::new(&wpath).join(file);
-            match std::fs::exists(&p) {
-                Ok(exists) if exists => return Some(p),
-                _ => {}
+
+            if tokio::fs::try_exists(&p).await.unwrap_or_default() {
+                return Some(p);
             }
         }
         None
     }
 
-    pub fn add_workspace(&mut self, w: &WorkspaceFolder) {
-        let Ok(wpath) = w.uri.to_file_path() else {
+    pub async fn add_workspace_folder(&mut self, wf: &WorkspaceFolder) {
+        let Ok(wpath) = wf.uri.to_file_path() else {
             return;
         };
 
-        let path = Self::get_config_file_path(&wpath).unwrap_or_default();
-        let content = std::fs::read_to_string(path).unwrap_or_default();
+        let wr = if let Some(config_path) = Self::get_config_file_path(&wpath).await
+            && let Ok(content) = tokio::fs::read_to_string(config_path).await
+        {
+            basic_toml::from_str(&content).unwrap_or_default()
+        } else {
+            ProtolsConfig::default()
+        };
 
-        let wr: ProtolsConfig = basic_toml::from_str(&content).unwrap_or_default();
         let fmt = ClangFormatter::new(
             &wr.config.path.clang_format,
             Some(wpath.to_str().expect("non-utf8 path")),
         );
 
-        self.workspaces.insert(w.uri.clone());
-        self.configs.insert(w.uri.clone(), wr);
-        self.formatters.insert(w.uri.clone(), fmt);
+        self.workspaces.insert(wf.uri.clone());
+        self.configs.insert(wf.uri.clone(), wr);
+        self.formatters.insert(wf.uri.clone(), Arc::new(fmt));
+    }
+
+    pub fn remove_workspace_folder(&mut self, wf: &WorkspaceFolder) {
+        let uri = &wf.uri;
+
+        self.workspaces.remove(uri);
+        self.configs.remove(uri);
+        self.formatters.remove(uri);
     }
 
     pub fn get_config_for_uri(&self, u: &Url) -> Option<&ProtolsConfig> {
@@ -82,9 +93,10 @@ impl WorkspaceProtoConfigs {
             .and_then(|w| self.configs.get(w))
     }
 
-    pub fn get_formatter_for_uri(&self, u: &Url) -> Option<&ClangFormatter> {
+    pub fn get_formatter_for_uri(&self, u: &Url) -> Option<Arc<ClangFormatter>> {
         self.get_workspace_for_uri(u)
             .and_then(|w| self.formatters.get(w))
+            .cloned()
     }
 
     pub fn get_workspace_for_uri(&self, u: &Url) -> Option<&Url> {
@@ -138,24 +150,6 @@ impl WorkspaceProtoConfigs {
         self.workspaces.iter().collect()
     }
 
-    pub fn get_outermost_workspaces(&self) -> HashSet<&Url> {
-        let mut workspace_urls: Vec<&Url> = self.workspaces.iter().collect();
-        workspace_urls.sort();
-        let workspace_urls = workspace_urls;
-
-        let mut outermost = HashSet::with_capacity(workspace_urls.len());
-        let mut last_added: Option<&Url> = None;
-
-        for url in workspace_urls {
-            if !last_added.is_some_and(|outer| url.as_str().starts_with(outer.as_str())) {
-                outermost.insert(url);
-                last_added = Some(url);
-            }
-        }
-
-        outermost
-    }
-
     pub fn no_workspace_mode(&mut self) {
         let wr = ProtolsConfig::default();
         let rp = if cfg!(target_os = "windows") {
@@ -181,7 +175,22 @@ impl WorkspaceProtoConfigs {
 
         self.workspaces.insert(uri.clone());
         self.configs.insert(uri.clone(), wr);
-        self.formatters.insert(uri.clone(), fmt);
+        self.formatters.insert(uri.clone(), Arc::new(fmt));
+    }
+
+    pub fn get_all_indexing_paths(&self) -> OutermostPaths {
+        let workspace_paths = self
+            .workspaces
+            .iter()
+            .filter_map(|url| url.to_file_path().ok());
+
+        let include_paths = self
+            .workspaces
+            .iter()
+            .flat_map(|url| self.get_include_paths(url))
+            .flatten();
+
+        OutermostPaths::from_iter(workspace_paths.chain(include_paths))
     }
 }
 
@@ -202,11 +211,11 @@ mod test {
         std::fs::write(f, include_str!("input/protols-valid.toml")).unwrap();
 
         let mut ws = WorkspaceProtoConfigs::new(vec![], None);
-        ws.add_workspace(&WorkspaceFolder {
+        ws.add_workspace_folder(&WorkspaceFolder {
             uri: Url::from_directory_path(tmpdir.path()).unwrap(),
             name: "Test".to_string(),
         });
-        ws.add_workspace(&WorkspaceFolder {
+        ws.add_workspace_folder(&WorkspaceFolder {
             uri: Url::from_directory_path(tmpdir2.path()).unwrap(),
             name: "Test2".to_string(),
         });
@@ -236,12 +245,12 @@ mod test {
         std::fs::write(f, include_str!("input/protols-valid.toml")).unwrap();
 
         let mut ws = WorkspaceProtoConfigs::new(vec![], None);
-        ws.add_workspace(&WorkspaceFolder {
+        ws.add_workspace_folder(&WorkspaceFolder {
             uri: Url::from_directory_path(tmpdir.path()).unwrap(),
             name: "Test".to_string(),
         });
 
-        ws.add_workspace(&WorkspaceFolder {
+        ws.add_workspace_folder(&WorkspaceFolder {
             uri: Url::from_directory_path(tmpdir2.path()).unwrap(),
             name: "Test2".to_string(),
         });
@@ -271,7 +280,7 @@ mod test {
             std::fs::write(f, include_str!("input/protols-valid.toml")).unwrap();
 
             let mut ws = WorkspaceProtoConfigs::new(vec![], None);
-            ws.add_workspace(&WorkspaceFolder {
+            ws.add_workspace_folder(&WorkspaceFolder {
                 uri: Url::from_directory_path(tmpdir.path()).unwrap(),
                 name: "Test".to_string(),
             });
@@ -294,7 +303,7 @@ mod test {
         let cli_paths = vec![absolute_path.clone(), PathBuf::from("relative/path")];
 
         let mut ws = WorkspaceProtoConfigs::new(cli_paths, None);
-        ws.add_workspace(&WorkspaceFolder {
+        ws.add_workspace_folder(&WorkspaceFolder {
             uri: Url::from_directory_path(tmpdir.path()).unwrap(),
             name: "Test".to_string(),
         });
@@ -328,7 +337,7 @@ mod test {
 
         let mut ws = WorkspaceProtoConfigs::new(cli_paths, None);
         ws.set_init_include_paths(init_paths);
-        ws.add_workspace(&WorkspaceFolder {
+        ws.add_workspace_folder(&WorkspaceFolder {
             uri: Url::from_directory_path(tmpdir.path()).unwrap(),
             name: "Test".to_string(),
         });
@@ -362,7 +371,7 @@ mod test {
 
         let mut ws = WorkspaceProtoConfigs::new(cli_paths, Some("fallback_path".into()));
         ws.set_init_include_paths(init_paths);
-        ws.add_workspace(&WorkspaceFolder {
+        ws.add_workspace_folder(&WorkspaceFolder {
             uri: Url::from_directory_path(tmpdir.path()).unwrap(),
             name: "Test".to_string(),
         });

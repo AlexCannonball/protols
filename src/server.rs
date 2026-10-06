@@ -1,9 +1,14 @@
+use std::ops::ControlFlow;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use async_lsp::{
     ClientSocket,
     lsp_types::{
         notification::{
-            DidChangeTextDocument, DidCreateFiles, DidDeleteFiles, DidOpenTextDocument,
-            DidRenameFiles, DidSaveTextDocument, Exit, Initialized, SetTrace,
+            DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidCreateFiles,
+            DidDeleteFiles, DidOpenTextDocument, DidRenameFiles, DidSaveTextDocument, Exit,
+            Initialized, SetTrace,
         },
         request::{
             Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
@@ -13,45 +18,70 @@ use async_lsp::{
     },
     router::Router,
 };
-use std::{ops::ControlFlow, path::PathBuf};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{RwLock, mpsc::UnboundedSender};
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::{config::WorkspaceProtoConfigs, log, state::ProtoLanguageState};
 
-mod lifecycle;
+use notification::Notification;
+use notification::worker::Worker;
 
-pub struct TickEvent;
+mod notification;
+pub(crate) mod progress;
+mod request;
+
 pub struct ProtoLanguageServer {
     pub client: ClientSocket,
-    pub(crate) log_handle: log::LogReloadHandle,
-    pub counter: i32,
     pub state: ProtoLanguageState,
-    pub configs: WorkspaceProtoConfigs,
-    pub shutdown_received: bool,
-    pub shutdown_cancel_token: CancellationToken,
+    pub configs: Arc<RwLock<WorkspaceProtoConfigs>>,
+    pub shutdown_token: CancellationToken,
+    notification_tx: UnboundedSender<Notification>,
 }
 
 impl ProtoLanguageServer {
+    pub fn new(
+        client: ClientSocket,
+        log_handle: log::LogReloadHandle,
+        cli_include_paths: Vec<PathBuf>,
+        fallback_include_path: Option<PathBuf>,
+        shutdown_token: CancellationToken,
+    ) -> Self {
+        let configs = Arc::new(RwLock::new(WorkspaceProtoConfigs::new(
+            cli_include_paths,
+            fallback_include_path,
+        )));
+        let state = ProtoLanguageState::new();
+        let notification_tx = Worker::start(
+            state.clone(),
+            configs.clone(),
+            log_handle,
+            client.clone(),
+            shutdown_token.child_token(),
+        );
+
+        Self {
+            notification_tx,
+            state,
+            configs,
+            client,
+            shutdown_token,
+        }
+    }
+
     pub fn new_router(
         client: ClientSocket,
         log_handle: log::LogReloadHandle,
         cli_include_paths: Vec<PathBuf>,
         fallback_include_path: Option<PathBuf>,
+        shutdown_token: CancellationToken,
     ) -> Router<Self> {
-        let mut router = Router::new(Self {
+        let router = Router::new(Self::new(
             client,
             log_handle,
-            counter: 0,
-            state: ProtoLanguageState::new(),
-            configs: WorkspaceProtoConfigs::new(cli_include_paths, fallback_include_path),
-            shutdown_received: false,
-            shutdown_cancel_token: CancellationToken::new(),
-        });
-
-        router.event::<TickEvent>(|st, _| {
-            st.counter += 1;
-            ControlFlow::Continue(())
-        });
+            cli_include_paths,
+            fallback_include_path,
+            shutdown_token,
+        ));
 
         // Ignore any unknown notification.
         router.unhandled_notification(|_, notif| {
@@ -60,30 +90,39 @@ impl ProtoLanguageServer {
         });
 
         // Handling request
-        router.request::<Initialize, _>(Self::initialize);
-        router.request::<Shutdown, _>(Self::shutdown);
-        router.request::<HoverRequest, _>(Self::hover);
-        router.request::<Completion, _>(Self::completion);
-        router.request::<PrepareRenameRequest, _>(Self::prepare_rename);
-        router.request::<Rename, _>(Self::rename);
-        router.request::<References, _>(Self::references);
-        router.request::<GotoDefinition, _>(Self::definition);
-        router.request::<DocumentSymbolRequest, _>(Self::document_symbol);
-        router.request::<WorkspaceSymbolRequest, _>(Self::workspace_symbol);
-        router.request::<Formatting, _>(Self::formatting);
-        router.request::<RangeFormatting, _>(Self::range_formatting);
+        router
+            .request::<Initialize, _>(Self::initialize)
+            .request::<Shutdown, _>(Self::shutdown)
+            .request::<HoverRequest, _>(Self::hover)
+            .request::<Completion, _>(Self::completion)
+            .request::<PrepareRenameRequest, _>(Self::prepare_rename)
+            .request::<Rename, _>(Self::rename)
+            .request::<References, _>(Self::references)
+            .request::<GotoDefinition, _>(Self::definition)
+            .request::<DocumentSymbolRequest, _>(Self::document_symbol)
+            .request::<WorkspaceSymbolRequest, _>(Self::workspace_symbol)
+            .request::<Formatting, _>(Self::formatting)
+            .request::<RangeFormatting, _>(Self::range_formatting);
 
         // Handling notification
-        router.notification::<Initialized>(Self::initialized);
-        router.notification::<SetTrace>(Self::set_trace);
-        router.notification::<DidSaveTextDocument>(Self::did_save);
-        router.notification::<DidOpenTextDocument>(Self::did_open);
-        router.notification::<DidChangeTextDocument>(Self::did_change);
-        router.notification::<DidCreateFiles>(Self::did_create_files);
-        router.notification::<DidRenameFiles>(Self::did_rename_files);
-        router.notification::<DidDeleteFiles>(Self::did_delete_files);
-        router.notification::<Exit>(Self::exit);
+        router
+            .notification::<Initialized>(Self::handle_notification)
+            .notification::<SetTrace>(Self::handle_notification)
+            .notification::<DidSaveTextDocument>(Self::handle_notification)
+            .notification::<DidOpenTextDocument>(Self::handle_notification)
+            .notification::<DidChangeTextDocument>(Self::handle_notification)
+            .notification::<DidCloseTextDocument>(Self::handle_notification)
+            .notification::<DidCreateFiles>(Self::handle_notification)
+            .notification::<DidRenameFiles>(Self::handle_notification)
+            .notification::<DidDeleteFiles>(Self::handle_notification)
+            .notification::<DidChangeWatchedFiles>(Self::handle_notification)
+            .notification::<Exit>(Self::handle_notification);
 
         router
+    }
+
+    #[inline]
+    pub fn new_request_guard(&self) -> DropGuard {
+        self.shutdown_token.child_token().drop_guard()
     }
 }
