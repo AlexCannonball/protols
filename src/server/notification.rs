@@ -3,8 +3,11 @@ use std::ops::ControlFlow;
 
 use async_lsp::lsp_types::notification::{self, Notification as N};
 use async_lsp::{Result, lsp_types};
+use tokio::sync::mpsc::error::TrySendError;
 
 use super::ProtoLanguageServer;
+
+use worker::WORKER_MESSAGE_BUFFER;
 
 pub(super) mod worker;
 
@@ -52,12 +55,31 @@ impl ProtoLanguageServer {
         N: lsp_types::notification::Notification,
         N::Params: Into<Notification>,
     {
-        if let Err(err) = self.notification_tx.send(params.into()) {
-            tracing::error!(method = N::METHOD, ?err, "Notification worker crashed!");
-            return ControlFlow::Break(Err(async_lsp::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Notification worker crashed unexpectedly",
-            ))));
+        match self.notification_tx.try_send(params.into()) {
+            Err(TrySendError::Full(_)) => {
+                tracing::error!(
+                    method = N::METHOD,
+                    WORKER_MESSAGE_BUFFER,
+                    "CRITICAL: Notification worker channel is FULL"
+                );
+
+                return ControlFlow::Break(Err(async_lsp::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("Notification channel overflowed on method: {}", N::METHOD),
+                ))));
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::error!(
+                    method = N::METHOD,
+                    "CRITICAL: Notification worker actor crashed or dropped its receiver!"
+                );
+
+                return ControlFlow::Break(Err(async_lsp::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "Notification worker crashed unexpectedly",
+                ))));
+            }
+            Ok(_) => {}
         }
 
         if N::METHOD != lsp_types::notification::Exit::METHOD {

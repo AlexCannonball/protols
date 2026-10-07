@@ -18,7 +18,7 @@ use async_lsp::{
     },
     router::Router,
 };
-use tokio::sync::{RwLock, mpsc::UnboundedSender};
+use tokio::sync::{RwLock, mpsc::Sender};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::{config::WorkspaceProtoConfigs, log, state::ProtoLanguageState};
@@ -35,7 +35,7 @@ pub struct ProtoLanguageServer {
     pub state: ProtoLanguageState,
     pub configs: Arc<RwLock<WorkspaceProtoConfigs>>,
     pub shutdown_token: CancellationToken,
-    notification_tx: UnboundedSender<Notification>,
+    notification_tx: Sender<Notification>,
 }
 
 impl ProtoLanguageServer {

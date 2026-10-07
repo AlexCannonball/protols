@@ -40,6 +40,8 @@ pub struct Worker {
     indexing: Indexing,
 }
 
+pub(super) const WORKER_MESSAGE_BUFFER: usize = 256;
+
 impl Worker {
     pub fn start(
         state: ProtoLanguageState,
@@ -47,8 +49,8 @@ impl Worker {
         log_handle: LogReloadHandle,
         client: ClientSocket,
         shutdown_token: CancellationToken,
-    ) -> tokio::sync::mpsc::UnboundedSender<Notification> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    ) -> tokio::sync::mpsc::Sender<Notification> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(WORKER_MESSAGE_BUFFER);
 
         let indexing = Indexing {
             cancel_token: shutdown_token.child_token(),
