@@ -144,7 +144,7 @@ impl ClangFormatter {
         let output = match timeout_result {
             Ok(Ok(out)) => out,
             Ok(Err(error)) => {
-                tracing::error!(%error, "failed to run protoc");
+                tracing::error!(%error, "failed to run clang-format");
                 return None;
             }
             Err(_elapsed) => {

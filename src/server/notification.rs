@@ -87,7 +87,7 @@ impl fmt::Display for Notification {
             Self::Initialized { .. } => notification::Initialized::METHOD,
             Self::OpenDocument { .. } => notification::DidOpenTextDocument::METHOD,
             Self::RenameFiles { .. } => notification::DidRenameFiles::METHOD,
-            Self::SaveDocument { .. } => notification::DidRenameFiles::METHOD,
+            Self::SaveDocument { .. } => notification::DidSaveTextDocument::METHOD,
             Self::SetTrace { .. } => notification::SetTrace::METHOD,
         };
         f.write_str(s)
