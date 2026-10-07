@@ -67,7 +67,7 @@ impl Replacement<'_> {
     }
 }
 
-const CLANG_FORMAT_TIMEOUT: Duration = Duration::from_secs(2);
+const CLANG_FORMAT_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl ClangFormatter {
     pub fn new(cmd: &str, wdir: Option<&str>) -> Self {

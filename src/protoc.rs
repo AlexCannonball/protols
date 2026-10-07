@@ -8,7 +8,7 @@ use tree_sitter::Point;
 
 use crate::utils::to_lsp_position;
 
-const PROTOC_TIMEOUT: Duration = Duration::from_secs(2);
+const PROTOC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// # Cancellation safety
 ///
