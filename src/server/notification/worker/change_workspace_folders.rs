@@ -54,6 +54,8 @@ impl Worker {
             purge_removed_workspace_folders(&self.state, &removed_paths, &new_outermost).await;
         }
 
+        self.refresh_file_watchers(&new_outermost);
+
         self.run_indexing_pipeline(new_outermost).await;
     }
 }

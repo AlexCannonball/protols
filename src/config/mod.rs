@@ -1,3 +1,4 @@
+pub(super) mod client;
 mod workspace;
 
 pub use workspace::WorkspaceProtoConfigs;

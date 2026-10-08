@@ -14,6 +14,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use crate::ProtoLanguageServer;
+use crate::config::client::ClientCapabilitiesSummary;
 
 impl ProtoLanguageServer {
     pub(in crate::server) fn initialize(
@@ -21,6 +22,8 @@ impl ProtoLanguageServer {
         params: InitializeParams,
     ) -> BoxFuture<'static, Result<InitializeResult, ResponseError>> {
         log_client_info(&params);
+
+        self.state.set_client_capabilities((&params).into());
 
         let configs = self.configs.clone();
         let workspace = Some(build_workspace_capabilities(&params));
@@ -30,27 +33,28 @@ impl ProtoLanguageServer {
         let rename_provider = build_rename_provider(&params);
 
         async move {
-            if let Some(init_options) = &params.initialization_options
-                && let Some(include_paths) = parse_init_include_paths(init_options)
-            {
-                tracing::info!(
-                    "Setting include paths from initialization options: {:?}",
-                    include_paths
-                );
-                configs.write().await.set_init_include_paths(include_paths);
-            }
-
-            if let Some(folders) = &params.workspace_folders
-                && !folders.is_empty()
             {
                 let mut config = configs.write().await;
-                for workspace in folders {
-                    tracing::info!("Workspace folder: {:?}", workspace);
-                    config.add_workspace_folder(workspace).await;
+
+                if let Some(init_options) = &params.initialization_options
+                    && let Some(include_paths) = parse_init_include_paths(init_options)
+                {
+                    tracing::info!(
+                        "Setting include paths from initialization options: {:?}",
+                        include_paths
+                    );
+                    config.set_init_include_paths(include_paths);
                 }
-            } else {
-                tracing::info!("Running in no workspace mode");
-                configs.write().await.no_workspace_mode();
+
+                if params.workspace_folders.as_ref().is_none_or(Vec::is_empty) {
+                    tracing::info!("Running in no workspace mode");
+                    config.no_workspace_mode();
+                } else {
+                    for folder in params.workspace_folders.iter().flatten() {
+                        tracing::info!("Workspace folder: {:?}", folder);
+                        config.add_workspace_folder(folder).await;
+                    }
+                }
             }
 
             let response = InitializeResult {
@@ -230,7 +234,8 @@ fn build_hover_provider(params: &InitializeParams) -> Option<HoverProviderCapabi
 fn build_workspace_symbol_provider(
     params: &InitializeParams,
 ) -> Option<OneOf<bool, WorkspaceSymbolOptions>> {
-    let work_done_progress_options = build_work_done_progress_options(params);
+    let work_done_progress_options =
+        ClientCapabilitiesSummary::build_work_done_progress_options(params);
 
     params
         .capabilities
@@ -247,7 +252,8 @@ fn build_workspace_symbol_provider(
 
 #[inline]
 fn build_rename_provider(params: &InitializeParams) -> Option<OneOf<bool, RenameOptions>> {
-    let work_done_progress_options = build_work_done_progress_options(params);
+    let work_done_progress_options =
+        ClientCapabilitiesSummary::build_work_done_progress_options(params);
 
     params
         .capabilities
@@ -260,15 +266,4 @@ fn build_rename_provider(params: &InitializeParams) -> Option<OneOf<bool, Rename
                 work_done_progress_options,
             })
         })
-}
-
-#[inline]
-fn build_work_done_progress_options(params: &InitializeParams) -> WorkDoneProgressOptions {
-    let work_done_progress = params
-        .capabilities
-        .window
-        .as_ref()
-        .and_then(|w| w.work_done_progress);
-
-    WorkDoneProgressOptions { work_done_progress }
 }

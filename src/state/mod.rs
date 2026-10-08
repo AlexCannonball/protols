@@ -10,6 +10,7 @@ use futures::Stream;
 use futures::future::{BoxFuture, Either, FutureExt, Shared};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::pin::Pin;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::{
@@ -28,6 +29,7 @@ use tokio::sync::{RwLock, RwLockWriteGuard, oneshot};
 use tree_sitter::{LanguageError, Query, QueryError};
 use walkdir::WalkDir;
 
+use crate::config::client::ClientCapabilitiesSummary;
 use crate::server::progress::{LspProgressReporter, OptionReporterExt};
 use crate::state::unique_uris::UniqueUris;
 use crate::{
@@ -215,6 +217,7 @@ pub struct SourceEntry {
 
 #[derive(Clone)]
 pub struct ProtoLanguageState {
+    client_capabilities: OnceLock<ClientCapabilitiesSummary>,
     pub(super) sources: Arc<RwLock<HashMap<Url, SourceEntry>>>,
     pub(super) documents: Arc<RwLock<HashMap<Url, CacheEntry>>>,
     parser: Arc<Mutex<ProtoParser>>,
@@ -271,6 +274,7 @@ impl ProtoLanguageState {
             .expect("Tree-sitter query compilation failed");
 
         Self {
+            client_capabilities: OnceLock::new(),
             sources: Arc::default(),
             documents: Arc::default(),
             parser: Arc::new(Mutex::new(ProtoParser::new())),
@@ -278,6 +282,18 @@ impl ProtoLanguageState {
             metamodel_query: Arc::new(metamodel_query),
             is_indexing: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[inline]
+    pub fn set_client_capabilities(&self, capabilities: ClientCapabilitiesSummary) {
+        self.client_capabilities
+            .set(capabilities)
+            .expect("Attempted to initialize client capabilities more than once per session!");
+    }
+
+    #[inline]
+    pub fn client_capabilities(&self) -> ClientCapabilitiesSummary {
+        self.client_capabilities.get().copied().unwrap_or_default()
     }
 
     #[inline]

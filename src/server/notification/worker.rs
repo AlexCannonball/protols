@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use async_lsp::ClientSocket;
-use async_lsp::lsp_types::request::WorkDoneProgressCreate;
-use async_lsp::lsp_types::{ProgressToken, WorkDoneProgressCreateParams};
+use async_lsp::lsp_types::ProgressToken;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +19,7 @@ mod close_document;
 mod create_files;
 mod delete_files;
 mod exit;
+mod file_watchers;
 mod initialized;
 mod open_document;
 mod rename_files;
@@ -114,16 +114,9 @@ impl Worker {
         let progress_token = ProgressToken::String("protobuf-workspace-indexing".to_string());
 
         let task_handle = tokio::spawn(async move {
-            let channel = client
-                .request::<WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
-                    token: progress_token.clone(),
-                })
-                .await
-                .inspect_err(|error| {
-                    tracing::warn!(?error, "Client failed to create work done progress channel")
-                })
-                .ok()
-                .map(|_| LspProgressChannel::new(client, progress_token, false));
+            let capabilities = state.client_capabilities();
+            let channel =
+                LspProgressChannel::try_create(capabilities, client, progress_token, false).await;
 
             channel.begin("Indexing workspace");
 

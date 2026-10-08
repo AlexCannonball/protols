@@ -1,8 +1,12 @@
 use async_lsp::ClientSocket;
+use async_lsp::lsp_types::WorkDoneProgressCreateParams;
+use async_lsp::lsp_types::request::{Request, WorkDoneProgressCreate};
 use async_lsp::lsp_types::{
     ProgressParams, ProgressParamsValue, ProgressToken, WorkDoneProgress, WorkDoneProgressBegin,
     WorkDoneProgressEnd, WorkDoneProgressReport, notification::Progress,
 };
+
+use crate::config::client::ClientCapabilitiesSummary;
 
 pub struct LspProgressChannel {
     client: ClientSocket,
@@ -11,12 +15,38 @@ pub struct LspProgressChannel {
 }
 
 impl LspProgressChannel {
-    pub fn new(client: ClientSocket, token: ProgressToken, cancellable: bool) -> Self {
-        Self {
+    pub async fn try_create(
+        client_capabilities: ClientCapabilitiesSummary,
+        client: ClientSocket,
+        token: ProgressToken,
+        cancellable: bool,
+    ) -> Option<Self> {
+        if !client_capabilities.supports_work_done_progress {
+            return None;
+        }
+
+        let request_params = WorkDoneProgressCreateParams {
+            token: token.clone(),
+        };
+
+        client
+            .request::<WorkDoneProgressCreate>(request_params)
+            .await
+            .inspect_err(|error| {
+                tracing::warn!(
+                    ?error,
+                    method = WorkDoneProgressCreate::METHOD,
+                    "Client advertised the method support, but failed to allocate token: {:?}",
+                    token
+                );
+            })
+            .ok()?;
+
+        Some(Self {
             client,
             token,
             cancellable,
-        }
+        })
     }
 
     pub fn reporter(&self) -> LspProgressReporter {
